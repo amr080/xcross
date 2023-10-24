@@ -3,27 +3,34 @@ package utils
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
+	"time"
 
 	"github.com/ava-labs/avalanche-network-runner/rpcpb"
 	"github.com/ava-labs/avalanchego/ids"
 	relayerEvm "github.com/ava-labs/awm-relayer/vms/evm"
+	"github.com/ava-labs/subnet-evm/accounts/abi/bind"
 	"github.com/ava-labs/subnet-evm/core/types"
 	"github.com/ava-labs/subnet-evm/ethclient"
 	"github.com/ava-labs/subnet-evm/plugin/evm"
 	"github.com/ava-labs/subnet-evm/rpc"
 	"github.com/ava-labs/subnet-evm/tests/utils/runner"
+	teleporterregistry "github.com/ava-labs/teleporter/abis/TeleporterRegistry"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	. "github.com/onsi/gomega"
+	"github.com/pkg/errors"
 )
 
 const (
-	fundedKeyStr = "56289e99c94b6912bfc12adc093c9b51124f0dc54ac7a766b2bc5ccf558d8027"
+	fundedKeyStr                   = "56289e99c94b6912bfc12adc093c9b51124f0dc54ac7a766b2bc5ccf558d8027"
+	TeleporterRegistryByteCodeFile = "./contracts/out/TeleporterRegistry.sol/TeleporterRegistry.json"
 )
 
 var (
@@ -265,6 +272,94 @@ func DeployTeleporterContracts(transactionBytes []byte, deployerAddress common.A
 		}
 		log.Info("Finished deploying Teleporter contracts")
 	}
+}
+
+func DeployTeleporterRegistry(ctx context.Context, teleporterContracts map[int]common.Address) {
+	log.Info("Deploying TeleporterRegistry contract to subnets")
+	subnetInfo := GetSubnetATestInfo()
+	chainTransactor, err := bind.NewKeyedTransactorWithChainID(fundedKey, subnetInfo.ChainIDInt)
+	Expect(err).Should(BeNil())
+	registryAbi, err := teleporterregistry.TeleporterregistryMetaData.GetAbi()
+	Expect(err).Should(BeNil())
+	nativeTokenSourceBytecode, err := ExtractByteCode(TeleporterRegistryByteCodeFile)
+
+	type registryConstructorArgs struct {
+		Version         *big.Int       `json:"version"`
+		ProtocolAddress common.Address `json:"protocolAddress"`
+	}
+
+	// Construct registry constructor args
+	var args []registryConstructorArgs
+	for version, address := range teleporterContracts {
+		args = append(args, registryConstructorArgs{
+			Version:         big.NewInt(int64(version)),
+			ProtocolAddress: address,
+		})
+	}
+
+	registryAddress, tx, _, err := bind.DeployContract(
+		chainTransactor,
+		*registryAbi,
+		nativeTokenSourceBytecode,
+		subnetInfo.ChainWSClient,
+		args,
+	)
+	Expect(err).Should(BeNil())
+
+	WaitForTransaction(ctx, tx.Hash(), subnetInfo.ChainWSClient)
+	bridgeCodeA, err := subnetInfo.ChainWSClient.CodeAt(ctx, registryAddress, nil)
+	Expect(err).Should(BeNil())
+	Expect(len(bridgeCodeA)).Should(BeNumerically(">", 2))
+}
+
+type byteCodeObj struct {
+	Object string `json:"object"`
+}
+
+type byteCodeFile struct {
+	ByteCode byteCodeObj `json:"bytecode"`
+}
+
+func WaitForTransaction(ctx context.Context, txHash common.Hash, client ethclient.Client) *types.Receipt {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// Loop until we find the transaction or time out
+	for {
+		receipt, err := client.TransactionReceipt(cctx, txHash)
+		if err == nil {
+			return receipt
+		} else {
+			log.Info("Waiting for transaction", "hash", txHash.Hex())
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+}
+
+func ExtractByteCode(byteCodeFileName string) ([]byte, error) {
+	log.Info("Using bytecode file at", byteCodeFileName)
+	byteCodeFileContents, err := os.ReadFile(byteCodeFileName)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to read bytecode file contents")
+	}
+	var byteCodeJSON byteCodeFile
+	err = json.Unmarshal(byteCodeFileContents, &byteCodeJSON)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to unmarshal bytecode file contents as JSON")
+	}
+	byteCodeString := byteCodeJSON.ByteCode.Object
+	if len(byteCodeString) < 2 {
+		return nil, errors.New("Invalid byte code length.")
+	}
+	// Strip off leading 0x if present
+	if byteCodeString[:2] == "0x" || byteCodeString[:2] == "0X" {
+		byteCodeString = byteCodeString[2:]
+	}
+	byteCode, err := hex.DecodeString(byteCodeString)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to decode bytecode string as hexadecimal.")
+	}
+	return byteCode, nil
 }
 
 func TearDownNetwork() {

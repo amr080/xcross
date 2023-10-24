@@ -4,11 +4,13 @@
 package tests
 
 import (
+	"context"
 	"os"
 	"testing"
 
 	deploymentUtils "github.com/ava-labs/teleporter/contract-deployment/utils"
 	testUtils "github.com/ava-labs/teleporter/tests/utils"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -36,6 +38,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	Expect(err).Should(BeNil())
 
 	testUtils.DeployTeleporterContracts(teleporterDeployerTransaction, teleporterDeployerAddress, teleporterContractAddress)
+	testUtils.DeployTeleporterRegistry(context.Background(), map[int]common.Address{1: teleporterContractAddress})
 	log.Info("Set up ginkgo before suite")
 })
 
